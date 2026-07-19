@@ -1,12 +1,14 @@
 ARG NGINX_VERSION=1.27.1
 ARG ALPINE_VERSION=3.20
 
-FROM golang:1.24-alpine AS agent-builder
+FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS agent-builder
 
+ARG TARGETOS
+ARG TARGETARCH
 WORKDIR /src
 COPY services/edge-agent/go.mod ./
 COPY services/edge-agent/ ./
-RUN CGO_ENABLED=0 go build \
+RUN CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build \
       -trimpath \
       -ldflags="-s -w" \
       -o /out/edge-agent \
