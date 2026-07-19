@@ -8,6 +8,8 @@
 deploy/edge/secrets/*
 !deploy/edge/secrets/README.md
 **/identity/
+!services/edge-agent/internal/identity/
+!services/edge-agent/internal/identity/**
 *.key
 *.pem
 *.p12
