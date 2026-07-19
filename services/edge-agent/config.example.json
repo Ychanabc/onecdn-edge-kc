@@ -1,0 +1,15 @@
+{
+  "control_plane_url": "https://edge-control.example.com",
+  "control_plane_ca_file": "/etc/cdn-edge/bootstrap-ca.crt",
+  "data_dir": "/var/lib/cdn-edge-agent",
+  "poll_interval": "30s",
+  "max_backoff": "5m",
+  "jitter_fraction": 0.2,
+  "artifact_max_bytes": 67108864,
+  "command_timeout": "30s",
+  "validation_command": ["openresty", "-t", "-p", "{staging}"],
+  "reload_command": ["openresty", "-s", "reload", "-p", "{current}"],
+  "health_url": "http://127.0.0.1:8080/healthz",
+  "health_timeout": "5s",
+  "release_retention": 5
+}

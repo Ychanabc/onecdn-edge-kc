@@ -1,0 +1,46 @@
+data_dir: /var/lib/vector
+
+sources:
+  openresty_access:
+    type: file
+    include:
+      - /var/lib/cdn-edge-agent/logs/access.log
+    read_from: beginning
+  modsecurity_audit:
+    type: file
+    include:
+      - /var/log/openresty/modsecurity-audit.json
+    read_from: beginning
+  vector_internal:
+    type: internal_metrics
+
+transforms:
+  parse_openresty:
+    type: remap
+    inputs:
+      - openresty_access
+    source: |
+      . = parse_json!(string!(.message))
+      .source = "openresty"
+  parse_modsecurity:
+    type: remap
+    inputs:
+      - modsecurity_audit
+    drop_on_error: true
+    source: |
+      . = parse_json!(string!(.message))
+      .source = "modsecurity"
+
+sinks:
+  structured_stdout:
+    type: console
+    inputs:
+      - parse_openresty
+      - parse_modsecurity
+    encoding:
+      codec: json
+  vector_metrics:
+    type: prometheus_exporter
+    inputs:
+      - vector_internal
+    address: 0.0.0.0:9598

@@ -1,0 +1,26 @@
+# Local environment values
+.env
+.env.*
+!.env.example
+!**/.env.example
+
+# Edge enrollment and identity secrets
+deploy/edge/secrets/*
+!deploy/edge/secrets/README.md
+**/identity/
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Runtime state and build output
+services/edge-agent/dist/
+dist/
+bin/
+coverage.out
+*.test
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/

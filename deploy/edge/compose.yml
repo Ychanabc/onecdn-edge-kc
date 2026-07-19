@@ -1,0 +1,273 @@
+name: cdn-edge
+
+x-edge-build: &edge-build
+  context: ../..
+  dockerfile: deploy/edge/openresty/Dockerfile
+
+x-runtime-defaults: &runtime-defaults
+  image: ${EDGE_RUNTIME_IMAGE:-cdn-edge-runtime:local}
+  init: true
+  restart: unless-stopped
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  logging:
+    driver: json-file
+    options:
+      max-file: '5'
+      max-size: 10m
+  deploy:
+    resources:
+      limits:
+        cpus: '2.00'
+        memory: 2G
+      reservations:
+        memory: 128M
+
+# ---------------------------------------------------------------------------
+# Observability profile (opt-in)
+#
+# The `vector` (log shipping) and `nginx-prometheus-exporter` (metrics) services
+# below are gated behind the "observability" Compose profile. The default
+# `docker compose up -d` starts ONLY edge-init / openresty / edge-agent; the
+# observability sidecars are excluded unless the profile is requested:
+#
+#   docker compose --profile observability up -d
+#
+# See deploy/edge/.env.example for the tunables (EDGE_METRICS_BIND_ADDRESS,
+# image pins) and for the two wiring caveats (loopback-only /nginx_status and
+# the access-log path) that also live next to each service below.
+# ---------------------------------------------------------------------------
+
+# Shared security + logging defaults for the observability sidecars. Mirrors the
+# hardening of x-runtime-defaults (drop all caps, no privilege escalation,
+# bounded json-file logs, edge network) minus the edge runtime image/resources.
+x-observability-defaults: &observability-defaults
+  restart: unless-stopped
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  networks:
+    - edge
+  logging:
+    driver: json-file
+    options:
+      max-file: '5'
+      max-size: 10m
+
+services:
+  edge-init:
+    image: ${EDGE_RUNTIME_IMAGE:-cdn-edge-runtime:local}
+    build: *edge-build
+    user: '0:0'
+    restart: 'no'
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      EDGE_DATA_DIR: /var/lib/cdn-edge-agent
+    entrypoint:
+      - /usr/local/bin/edge-data-init
+    volumes:
+      - edge_data:/var/lib/cdn-edge-agent
+
+  openresty:
+    <<: *runtime-defaults
+    build: *edge-build
+    user: '65534:65534'
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,uid=65534,gid=65534,mode=1770
+    entrypoint:
+      - /usr/local/openresty/bin/openresty
+    command:
+      - -p
+      - /var/lib/cdn-edge-agent/current/
+      - -c
+      - conf/nginx.conf
+      - -g
+      - daemon off;
+    volumes:
+      - edge_data:/var/lib/cdn-edge-agent
+      # Observability (shared log volume): lets the optional `vector` service
+      # (profile "observability") tail the OpenResty/ModSecurity JSON logs, and
+      # gives ModSecurity's SecAuditLog (/var/log/openresty/modsecurity-audit.json)
+      # a writable target under the read-only rootfs. This is the documented
+      # "Runtime mounts" dir (see openresty/README.md); it is inert for the
+      # default stack beyond providing this writable log directory.
+      - edge_logs:/var/log/openresty
+    # Host networking is required because signed L4 services may listen on any TCP/UDP port.
+    network_mode: host
+    depends_on:
+      edge-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -qO- http://127.0.0.1:8080/healthz | grep -q '^ok'
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  edge-agent:
+    <<: *runtime-defaults
+    build: *edge-build
+    user: '65534:65534'
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,uid=65534,gid=65534,mode=1770
+    entrypoint:
+      - /usr/local/bin/edge-agent-entrypoint
+    environment:
+      EDGE_ACCESS_LOG_FILE: ${EDGE_ACCESS_LOG_FILE:-}
+      EDGE_ARTIFACT_MAX_BYTES: ${EDGE_ARTIFACT_MAX_BYTES:-67108864}
+      EDGE_BOOTSTRAP_TOKEN_FILE: /run/secrets/edge_bootstrap_token
+      EDGE_COMMAND_TIMEOUT: ${EDGE_COMMAND_TIMEOUT:-30s}
+      EDGE_CONTROL_PLANE_CA_FILE: /run/secrets/edge_gateway_ca
+      EDGE_CONTROL_PLANE_URL: ${EDGE_CONTROL_PLANE_URL:?set EDGE_CONTROL_PLANE_URL}
+      EDGE_DATA_DIR: /var/lib/cdn-edge-agent
+      EDGE_HEALTH_TIMEOUT: ${EDGE_HEALTH_TIMEOUT:-5s}
+      EDGE_HEALTH_URL: http://127.0.0.1:8080/healthz
+      EDGE_JITTER_FRACTION: ${EDGE_JITTER_FRACTION:-0.2}
+      EDGE_MAX_BACKOFF: ${EDGE_MAX_BACKOFF:-5m}
+      EDGE_POLL_INTERVAL: ${EDGE_POLL_INTERVAL:-30s}
+      EDGE_RELEASE_RETENTION: ${EDGE_RELEASE_RETENTION:-5}
+      EDGE_RELOAD_COMMAND: '["openresty","-s","reload","-p","{current}","-c","conf/nginx.conf"]'
+      EDGE_STATUS_URL: ${EDGE_STATUS_URL:-http://127.0.0.1:8080/nginx_status}
+      EDGE_VALIDATION_COMMAND: '["openresty","-t","-p","{staging}","-c","conf/nginx.conf"]'
+    secrets:
+      - edge_bootstrap_token
+      - edge_gateway_ca
+    volumes:
+      - edge_data:/var/lib/cdn-edge-agent
+    network_mode: service:openresty
+    pid: service:openresty
+    depends_on:
+      openresty:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - test -s /var/lib/cdn-edge-agent/identity/identity.json && test -L /var/lib/cdn-edge-agent/current && wget -qO- http://127.0.0.1:8080/healthz >/dev/null
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 256M
+        reservations:
+          memory: 32M
+
+  # Vector — log shipping (optional; profile "observability").
+  # Tails OpenResty's JSON access log and ModSecurity's JSON audit log from the
+  # shared `edge_logs` volume (read-only), parses them (vector.yaml), echoes
+  # structured events to stdout (captured by the json-file driver), and exports
+  # Vector's own internal metrics for Prometheus on :9598.
+  #
+  # Log-source caveat: vector.yaml reads /var/lib/cdn-edge-agent/logs/access.log and
+  # /var/log/openresty/modsecurity-audit.json. ModSecurity writes its audit log
+  # there out of the box (modsecurity/main.conf), so those events flow. The
+  # access log, however, is emitted by the *signed* release config compiled in
+  # the signed release compiler, which currently writes `access_log ../logs/access.log`
+  # (i.e. <EDGE_DATA_DIR>/logs/access.log on the edge_data volume), NOT
+  # /var/log/openresty/access.json. Until that release config is pointed at
+  # /var/log/openresty/access.json, the access.json source stays empty.
+  vector:
+    <<: *observability-defaults
+    profiles:
+      - observability
+    image: ${EDGE_VECTOR_IMAGE:-timberio/vector:0.56.0-alpine}
+    user: '65534:65534'
+    read_only: true
+    command:
+      - --config
+      - /etc/vector/vector.yaml
+    volumes:
+      - ./openresty/vector/vector.yaml:/etc/vector/vector.yaml:ro
+      - edge_logs:/var/log/openresty:ro
+      - edge_data:/var/lib/cdn-edge-agent:ro
+    tmpfs:
+      - /var/lib/vector:size=64m,uid=65534,gid=65534,mode=0700
+      - /tmp:size=32m,uid=65534,gid=65534,mode=1770
+    ports:
+      # Vector internal metrics (prometheus_exporter sink, :9598 in vector.yaml).
+      - '${EDGE_METRICS_BIND_ADDRESS:-127.0.0.1}:9598:9598'
+    depends_on:
+      openresty:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '1.00'
+          memory: 256M
+        reservations:
+          memory: 32M
+
+  # nginx-prometheus-exporter — metrics (optional; profile "observability").
+  # Scrapes OpenResty's stub_status and exposes Prometheus metrics on :9113,
+  # host-published only on ${EDGE_METRICS_BIND_ADDRESS:-127.0.0.1}.
+  #
+  # env_file carries the shared exporter defaults; the flags below override the
+  # file's loopback-oriented SCRAPE_URI / listen-address for this bridge-network
+  # deployment — we reach OpenResty by its service DNS name and listen on all
+  # container interfaces (host exposure is still limited by the ports binding).
+  #
+  # Scrape caveat: /nginx_status is `allow 127.0.0.1; allow ::1; deny all;` in
+  # both the baked and the compiled (signed) OpenResty configs, so a scrape from
+  # this separate container over the `edge` bridge is answered with HTTP 403.
+  # To actually collect NGINX metrics, either (a) extend the stub_status
+  # allow-list to the compose bridge subnet in the OpenResty config, or (b) run
+  # this exporter as an OpenResty netns sidecar (network_mode: service:openresty)
+  # scraping http://127.0.0.1:8080/nginx_status, the way edge-agent does.
+  nginx-prometheus-exporter:
+    <<: *observability-defaults
+    profiles:
+      - observability
+    image: ${EDGE_NGINX_EXPORTER_IMAGE:-nginx/nginx-prometheus-exporter:1.5.1}
+    read_only: true
+    env_file:
+      - ./openresty/prometheus/nginx-prometheus-exporter.env
+    command:
+      - --nginx.scrape-uri=http://openresty:8080/nginx_status
+      - --web.listen-address=:9113
+    ports:
+      - '${EDGE_METRICS_BIND_ADDRESS:-127.0.0.1}:9113:9113'
+    depends_on:
+      openresty:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 64M
+        reservations:
+          memory: 16M
+
+networks:
+  edge:
+    driver: bridge
+
+volumes:
+  edge_data:
+  # Shared OpenResty/ModSecurity log directory consumed by the optional `vector`
+  # service (profile "observability"). Declared unconditionally so the openresty
+  # mount is stable, but only written/read when the profile is in use.
+  edge_logs:
+
+secrets:
+  edge_bootstrap_token:
+    file: ${EDGE_BOOTSTRAP_TOKEN_FILE:-./secrets/edge-bootstrap-token}
+  edge_gateway_ca:
+    file: ${EDGE_GATEWAY_CA_FILE:-./secrets/edge-gateway-ca.crt}

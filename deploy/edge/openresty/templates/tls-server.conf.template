@@ -1,0 +1,32 @@
+# Mount certificates at runtime; never bake certificate material into images.
+server {
+  listen 8443 ssl;
+  http2 on;
+  # Requires the custom Nginx QUIC runtime; keep TCP fallback on the same port.
+  listen 8443 quic reuseport;
+  http3 on;
+  server_name __SITE_HOST__;
+
+  ssl_certificate /run/secrets/edge_tls_certificate.pem;
+  ssl_certificate_key /run/secrets/edge_tls_private_key.pem;
+  ssl_protocols TLSv1.2 TLSv1.3;
+  ssl_session_cache shared:edge_tls:20m;
+  ssl_session_timeout 1d;
+  ssl_session_tickets off;
+  ssl_ciphers "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256";
+  ssl_prefer_server_ciphers off;
+
+  add_header Alt-Svc 'h3=":8443"; ma=86400' always;
+  add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+  add_header X-Content-Type-Options "nosniff" always;
+  add_header X-Frame-Options "DENY" always;
+  add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+  add_header X-Request-ID $edge_request_id always;
+
+  location / {
+    proxy_pass __ORIGIN_SCHEME__://edge_origin___SITE_ID__;
+    proxy_cache edge_cache;
+    proxy_cache_lock on;
+    proxy_cache_use_stale error timeout updating http_500 http_502 http_503 http_504;
+  }
+}
