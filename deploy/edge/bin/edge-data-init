@@ -1,0 +1,18 @@
+#!/bin/sh
+set -euo pipefail
+
+data_dir="${EDGE_DATA_DIR:-/var/lib/cdn-edge-agent}"
+release_dir="$data_dir/releases/bootstrap"
+
+install -d -o 65534 -g 65534 -m 0750 "$data_dir" "$data_dir/releases"
+if [ ! -d "$release_dir" ]; then
+  cp -R /usr/local/share/cdn-edge/bootstrap "$release_dir"
+  chown -R 65534:65534 "$release_dir"
+  find "$release_dir" -type d -exec chmod 0750 {} +
+  find "$release_dir" -type f -exec chmod 0640 {} +
+fi
+
+if [ ! -L "$data_dir/current" ]; then
+  ln -s "releases/bootstrap" "$data_dir/current"
+  chown -h 65534:65534 "$data_dir/current"
+fi

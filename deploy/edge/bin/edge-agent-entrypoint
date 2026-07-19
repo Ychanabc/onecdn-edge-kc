@@ -1,0 +1,18 @@
+#!/bin/sh
+set -euo pipefail
+
+data_dir="${EDGE_DATA_DIR:-/var/lib/cdn-edge-agent}"
+token_file="${EDGE_BOOTSTRAP_TOKEN_FILE:-/run/secrets/edge_bootstrap_token}"
+
+if [ ! -s "$data_dir/identity/identity.json" ]; then
+  if [ ! -r "$token_file" ]; then
+    echo "edge bootstrap token file is required for first enrollment" >&2
+    exit 1
+  fi
+  EDGE_BOOTSTRAP_TOKEN="$(cat "$token_file")"
+  export EDGE_BOOTSTRAP_TOKEN
+else
+  unset EDGE_BOOTSTRAP_TOKEN
+fi
+
+exec /usr/local/bin/edge-agent

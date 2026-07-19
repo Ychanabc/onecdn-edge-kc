@@ -16,7 +16,7 @@ deploy/edge/secrets/*
 # Runtime state and build output
 services/edge-agent/dist/
 dist/
-bin/
+/bin/
 coverage.out
 *.test
 
